@@ -7,7 +7,7 @@ BIN=build/gdb-bridge
 
 $(BIN): $(wildcard *.c)
 	mkdir -p $(@D)
-	gcc $^ -o $@
+	gcc $^ -o $@ -lpthread
 
 run: $(BIN)
 	./$(BIN)
