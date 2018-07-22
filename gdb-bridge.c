@@ -5,9 +5,10 @@
 #include <malloc.h>
 #include <stdio.h>
 #include <assert.h>
-#include <pthread.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/prctl.h>
 #include <netinet/in.h>
 
 #include "debug.h"
@@ -41,74 +42,41 @@ void start_gdb(int port) {
   assert(0);
 }
 
-static pthread_mutex_t client_mut, server_mut;
-
-void *bridge_client_to_server(void *args) {
-  printf("thread client to server start\n");
-  size_t size = 0;
-  char *data = NULL;
-  struct gdb_conn *client = ((struct gdb_conn**)args)[0];
-  struct gdb_conn *server = ((struct gdb_conn**)args)[1];
-  while(1) {
-	pthread_mutex_lock(&client_mut);
-	data = (void*)gdb_recv(client, &size);
-	pthread_mutex_unlock(&client_mut);
-
-	printf("$ message: client --> server:%lx:\e[33m%s\e[0m$\n", size, data);
-
-	pthread_mutex_lock(&server_mut);
-	gdb_send(server, (void*)data, size);
-	pthread_mutex_unlock(&server_mut);
-
-	free(data);
-  }
-}
-
-void *bridge_server_to_client(void *args) {
-  printf("thread server to client start\n");
-  size_t size = 0;
-  char *data = NULL;
-  struct gdb_conn *client = ((struct gdb_conn**)args)[0];
-  struct gdb_conn *server = ((struct gdb_conn**)args)[1];
-  while(1) {
-	pthread_mutex_lock(&server_mut);
-	data = (void*)gdb_recv(server, &size);
-	pthread_mutex_unlock(&server_mut);
-
-	printf("$ message: server --> client:%lx:\e[32m%s\e[0m$\n", size, data);
-
-	pthread_mutex_lock(&client_mut);
-	gdb_send(client, (void*)data, size);
-	pthread_mutex_unlock(&client_mut);
-
-	free(data);
-  }
-}
-
 void start_bridge(int fd, int serv_port) {
   struct gdb_conn *client = gdb_server_start(fd);
   struct gdb_conn *server = NULL;
   while(server == NULL) {
-	server = gdb_begin_inet("127.0.0.1", serv_port);
+	  server = gdb_begin_inet("127.0.0.1", serv_port);
   }
 
-  // setup args
-  static struct gdb_conn *args[2] = { NULL, NULL };
-  args[0] = client; args[1] = server;
+  size_t size = 0;
+  char *data = NULL;
 
-  // init lock
-  pthread_mutex_init(&client_mut, NULL);
-  pthread_mutex_init(&server_mut, NULL);
-  
-  // create threads
-  pthread_t client_to_server;
-  pthread_t server_to_client;
+  /* the first loop */ {
+	data = (void*)gdb_recv(client, &size);
+	printf("$ message: client --> server:%lx:\e[33m%s\e[0m$\n", size, data);
+	gdb_send(server, (void*)data, size);
+	free(data);
 
-  pthread_create(&client_to_server, NULL, bridge_client_to_server, args);
-  pthread_create(&server_to_client, NULL, bridge_server_to_client, args);
+	data = (void*)gdb_recv(server, &size);
+	printf("$ message: server --> client:%lx:\e[32m%s\e[0m$\n", size, data);
+	gdb_send(client, (void*)data, size);
+	printf("\n");
+	free(data);
+  }
 
-  pthread_join(client_to_server, NULL);
-  pthread_join(server_to_client, NULL);
+  while(1) {
+	data = (void*)gdb_recv(client, &size);
+	printf("$ message: client --> server:%lx:\e[33m%s\e[0m$\n", size, data);
+	gdb_send(server, (void*)data, size);
+	free(data);
+
+	data = (void*)gdb_recv(server, &size);
+	printf("$ message: server --> client:%lx:\e[32m%s\e[0m$\n", size, data);
+	gdb_send(client, (void*)data, size);
+	printf("\n");
+	free(data);
+  }
 }
 
 int get_free_servfd() {
@@ -148,6 +116,9 @@ int main(int argc, char *argv[]) {
   int gdb_port = get_port_of_servfd(fd);
 
   if(fork() == 0) {
+    int r = prctl(PR_SET_PDEATHSIG, SIGTERM);
+    if (r == -1) { panic("prctl error"); }
+
 	start_bridge(fd, 1234);
   } else {
 	usleep(100000);
